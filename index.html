@@ -1,0 +1,1591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF16" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Luxe Data Store - Fast & Affordable Data</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  // Load Firebase modules using standard UMD URLs
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+  import { 
+    getAuth, 
+    signOut, 
+    onAuthStateChanged,
+    signInAnonymously,
+    signInWithCustomToken,
+    setPersistence,
+    browserLocalPersistence
+  } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+  import { 
+    getFirestore, doc, addDoc, onSnapshot, collection, 
+    setLogLevel, updateDoc, deleteDoc 
+  } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+  // --- Global Firebase and App Variables ---
+  let db;
+  let auth;
+  let userId = null;
+  let isAuthReady = false; 
+  let currentTransactionSnapshot = []; 
+  let currentCartItems = []; 
+
+  const defaultPackagesToShow = 6;
+  let currentCategory = 'Electronics'; 
+  let showAllPackages = false;
+
+  // --- MANUAL PAYMENT & CONTACT DETAILS ---
+  const manualPaymentDetails = {
+    accountName: 'Asante Jude Osei Bonsu Nana', 
+    accountNumber: '0548164533',
+    bank: 'MTN Mobile Money',
+    reference: 'Use Unique Product Code for Reference' 
+  };
+  
+  // NOTE: This link is used for the CHECKOUT RECEIPT for payment confirmation.
+  const staticConfirmationLink = 'https://wa.me/233548164533?text=Luxe%20Store%20Payment%20Confirmation%20%F0%9F%A7%B9%E2%9C%94%EF%B8%8F';
+  // NOTE: This link is used for the general contact page inquiries.
+  const generalInquiryLink = 'https://wa.me/233548164533?text=Hi%20Luxe%20Store%20%F0%9F%9B%8D%E2%9C%A8';
+
+
+  // --- PRODUCT DATA ARRAY (WITH UNIQUE CODES) ---
+  const allProducts = [
+    // ELECTRONICS PRODUCT (Category: Electronics)
+    {
+        id: 'EL-001', 
+        uniqueCode: '32455', 
+        name: 'Silver Crest LM Blender 2 in 1', 
+        price: 320, 
+        network: 'Silver Crest', 
+        description: 'Items: 1x Silver Crest blender, 1x Silver crest Large cup and 1x Silver Crest Small cup',
+        category: 'Electronics'
+    },
+    // DATA STORE PRODUCTS (Category: Data Store)
+    { id: 'DATA-001', uniqueCode: '10011', name: '1GB Data Package', price: 5.50, network: 'Data', category: 'Data Store', description: 'Instant Mobile Data' },
+    { id: 'DATA-002', uniqueCode: '10022', name: '2GB Data Package', price: 12.00, network: 'Data', category: 'Data Store', description: 'Instant Mobile Data' },
+    { id: 'DATA-003', uniqueCode: '10033', name: '3GB Data Package', price: 18.00, network: 'Data', category: 'Data Store', description: 'Instant Mobile Data' },
+    { id: 'DATA-004', uniqueCode: '10044', name: '4GB Data Package', price: 25.00, network: 'Data', category: 'Data Store', description: 'Instant Mobile Data' },
+    { id: 'DATA-005', uniqueCode: '10055', name: '5GB Data Package', price: 29.00, network: 'Data', category: 'Data Store', description: 'Instant Mobile Data' },
+    { id: 'DATA-006', uniqueCode: '10100', name: '10GB Data Package', price: 55.00, network: 'Data', category: 'Data Store', description: 'Instant Mobile Data' },
+  ]; 
+  
+  // --- Theme Management ---
+  function saveThemePreference(theme) {
+    document.body.setAttribute('data-theme', theme);
+    document.getElementById('theme-toggle-btn').textContent = theme === 'dark' ? '☀️' : '🌙';
+  }
+
+  window.toggleTheme = function() {
+    const currentTheme = document.body.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    saveThemePreference(newTheme);
+  }
+
+  function loadThemePreference() {
+    // Default to dark mode
+    saveThemePreference('dark'); 
+  }
+  
+  // --- Firebase Initialization and Authentication (REVISED FOR BUTTON) ---
+  window.initFirebase = async function() {
+      setLogLevel('Debug');
+      
+      const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+      const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+      if (!firebaseConfig) {
+          console.error("Firebase configuration not found. Cannot enable persistence.");
+          userId = 'N/A';
+          isAuthReady = true;
+          window.enableStartButton(); // Enable button anyway for testing
+          return;
+      }
+
+      const app = initializeApp(firebaseConfig);
+      auth = getAuth(app);
+      db = getFirestore(app);
+      
+      // Initial sign in attempt (async, but listener ensures flow)
+      try {
+        await setPersistence(auth, browserLocalPersistence);
+      } catch (error) {
+        console.warn("Error setting auth persistence:", error);
+      }
+
+      if (initialAuthToken) {
+          try {
+              await signInWithCustomToken(auth, initialAuthToken);
+          } catch (error) {
+              console.warn("Custom token sign-in failed. Falling back to anonymous sign-in.");
+              await signInAnonymously(auth);
+          }
+      } else {
+        await signInAnonymously(auth);
+      }
+
+      // We wait for the first auth state change to confirm user ID is set
+      const unsubscribe = onAuthStateChanged(auth, (user) => {
+          if (user) { 
+              userId = user.uid;
+              isAuthReady = true;
+          } else {
+              // Fallback for unexpected sign-out or initial failure
+              userId = 'N/A';
+              isAuthReady = true;
+          }
+          window.enableStartButton(); // <<< NOW CALLS ENABLE BUTTON
+          unsubscribe(); // Stop listening after the first state change
+      });
+      
+      loadThemePreference();
+  }
+
+  // --- UI Flow Handlers ---
+
+  window.enableStartButton = function() {
+    // Show and enable the start button once authentication is ready
+    const button = document.getElementById('startShoppingBtn');
+    const loadingText = document.querySelector('#get-started .loading-text');
+
+    loadingText.textContent = "Ready to go!";
+    button.classList.add('ready');
+    button.onclick = window.goToMainApp; // Bind the navigation function
+  }
+  
+  window.goToMainApp = function() {
+    // Safety check: Don't proceed if auth isn't ready
+    if (!isAuthReady) {
+        window.showNotificationModal('Hold on', 'The application is still loading resources. Please wait a moment.');
+        return;
+    }
+    
+    // TRANSITION: Hide splash and show main content
+    document.getElementById('get-started').style.display='none';
+    
+    const main = document.getElementById('main');
+    const menuBtn = document.querySelector('.menu-btn'); 
+    const themeBtn = document.getElementById('theme-toggle-btn');
+    
+    main.style.display='flex';
+    menuBtn.style.display = 'flex'; 
+    themeBtn.style.display = 'flex'; 
+
+    // Use the confirmed userId
+    document.getElementById('userIdDisplay').textContent = `User ID: ${userId}`;
+    
+    window.showSection(document.querySelector('[data-section-id="home"]'), 'home');
+    
+    currentCategory = 'Electronics'; 
+    showAllPackages = false; 
+    
+    document.querySelectorAll('.network-buttons button').forEach(btn => btn.classList.remove('active'));
+    const initialBtn = document.querySelector(`.network-buttons button[data-category="${currentCategory}"]`);
+    if (initialBtn) initialBtn.classList.add('active');
+    
+    window.loadHomeProducts(currentCategory, showAllPackages);
+    // Start listening to real-time updates only after main app is launched
+    listenToTransactions();
+    listenToCart(); 
+  }
+
+
+  // --- Firestore Helper Functions (Transactions) ---
+  function getTransactionsCollectionRef() {
+      if (!db || !userId || userId === 'N/A') return null; // Enhanced check
+      const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+      return collection(db, `artifacts/${appId}/users/${userId}/transactions`);
+  }
+  
+  async function saveNewTransaction(trx) {
+      const colRef = getTransactionsCollectionRef();
+      if (!colRef) {
+          console.warn("Firestore not initialized or user not logged in. Cannot save transaction.");
+          return null;
+      }
+      try {
+          const docRef = await addDoc(colRef, {...trx, createdAt: new Date()});
+          return docRef;
+      } catch(e) {
+          console.error("Error adding document: ", e);
+          window.showNotificationModal('Error', 'Failed to save transaction history.');
+          return null;
+      }
+  }
+  
+  function listenToTransactions() {
+      if (!isAuthReady || !userId) return;
+
+      const colRef = getTransactionsCollectionRef();
+      if (!colRef) return;
+
+      onSnapshot(colRef, (snapshot) => {
+          const transactions = [];
+          snapshot.forEach(doc => {
+              transactions.push({ firestoreId: doc.id, ...doc.data() });
+          });
+          
+          transactions.sort((a, b) => {
+              const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(0);
+              const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(0);
+              return dateB - dateA;
+          });
+          
+          currentTransactionSnapshot = transactions;
+          
+          if (document.getElementById('transactions').style.display !== 'none') {
+                window.renderTransactions();
+          }
+      }, (error) => {
+          console.error("Error listening to transactions: ", error);
+      });
+  }
+
+  // --- Firestore Helper Functions (Cart) ---
+
+  function getCartCollectionRef() {
+      if (!db || !userId || userId === 'N/A') return null; // Enhanced check
+      const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+      return collection(db, `artifacts/${appId}/users/${userId}/cartItems`);
+  }
+
+  function listenToCart() {
+      if (!isAuthReady || !userId) return;
+
+      const colRef = getCartCollectionRef();
+      if (!colRef) return;
+
+      onSnapshot(colRef, (snapshot) => {
+          const items = [];
+          snapshot.forEach(doc => {
+              const item = { cartId: doc.id, ...doc.data() };
+              const productDetail = allProducts.find(p => p.id === item.id);
+              // Merge category into cart item for dynamic checkout logic
+              items.push({ 
+                ...item, 
+                category: productDetail ? productDetail.category : 'Unknown' 
+              });
+          });
+          currentCartItems = items;
+          
+          // Update cart link counter and render if active
+          const cartCount = document.getElementById('cartItemCount');
+          if (cartCount) cartCount.textContent = currentCartItems.length > 0 ? ` (${currentCartItems.length})` : '';
+
+          if (document.getElementById('cart').style.display !== 'none') {
+              window.renderCart();
+          }
+      }, (error) => {
+          console.error("Error listening to cart: ", error);
+      });
+  }
+
+  window.addToCart = async function(productId){
+      const product = allProducts.find(p => p.id === productId);
+
+      if (!product) {
+          console.error('Product ID not found:', productId);
+          window.showNotificationModal('Error', 'Product details are missing.');
+          return;
+      }
+      
+      const colRef = getCartCollectionRef();
+      if (!colRef) {
+          // This should now only trigger if something is fundamentally wrong with auth/db
+          window.showNotificationModal('Error', 'Authentication or database initialization failed. Please try reloading.');
+          return;
+      }
+      
+      try {
+          await addDoc(colRef, {
+              id: product.id, 
+              name: product.name, 
+              price: product.price, 
+              network: product.network,
+              description: product.description || '',
+              uniqueCode: product.uniqueCode, // uniqueCode included
+              addedAt: new Date()
+          });
+          window.showNotificationModal('Item Added', `${product.name} has been added to your cart.`);
+      } catch(e) {
+          console.error("Error adding to cart: ", e);
+          window.showNotificationModal('Error', 'Failed to add item to cart. Check console for details.');
+      }
+  }
+
+  window.removeFromCart = async function(cartId){
+      const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+      if (!db || !userId || !cartId) return;
+
+      try {
+          const docRef = doc(db, `artifacts/${appId}/users/${userId}/cartItems/${cartId}`);
+          await deleteDoc(docRef);
+          // UI update handled by onSnapshot listener
+      } catch(e) {
+          console.error("Error removing from cart: ", e);
+          window.showNotificationModal('Error', 'Failed to remove item from cart.');
+      }
+  }
+  
+  // --- App Logic Functions ---
+
+  window.createProductCard = function(p){
+      const div = document.createElement('div');
+      div.classList.add('card');
+      
+      setTimeout(()=>{ div.classList.add('show'); }, 50);
+      
+      const labelText = p.network || 'LUXE'; 
+      const productId = p.id; 
+      const uniqueCode = p.uniqueCode; 
+
+      div.innerHTML = `
+        <div>
+          <div class="mtn-label">${labelText}</div>
+          <h2>${p.name}</h2>
+          <p style="font-size:0.9rem; opacity:0.8; color:var(--color-primary); margin-bottom:1rem; font-weight:700;">Code: ${uniqueCode}</p> 
+          ${p.description ? `<p style="font-size:0.9rem; opacity:0.8; margin-bottom:1rem; color:inherit;">${p.description}</p>` : ''} 
+          <p>${p.price.toFixed(2)} GHC</p>
+        </div>
+        <button class="btn-purchase" onclick="addToCart('${productId}')">Add to Cart</button>
+      `;
+      return div;
+  }
+
+  window.toggleDataInfo = function(){
+    const infoPanel = document.getElementById('dataInfoPanel');
+    const toggleBtn = document.getElementById('dataInfoToggleBtn');
+    
+    const isVisible = infoPanel.style.display === 'flex';
+    infoPanel.style.display = isVisible ? 'none' : 'flex';
+    toggleBtn.classList.toggle('active', !isVisible);
+  }
+
+  window.loadHomeProducts = function(category, showAll){
+    const container = document.getElementById('homeProducts');
+    container.innerHTML=''; 
+    currentCategory = category;
+    
+    const dataInfoToggleBtn = document.getElementById('dataInfoToggleBtn');
+    const dataInfoPanel = document.getElementById('dataInfoPanel');
+
+    // ONLY SHOW THE INFO ICON FOR DATA STORE
+    if (category === 'Data Store') {
+        dataInfoToggleBtn.style.display = 'flex';
+    } else {
+        dataInfoToggleBtn.style.display = 'none';
+        // Ensure panel is hidden if we navigate away from Data Store
+        dataInfoPanel.style.display = 'none'; 
+    }
+    
+    const filteredProducts = allProducts.filter(p => p.category === category); 
+    
+    const btn = document.getElementById('viewMoreBtn');
+    
+    if (filteredProducts.length === 0) {
+        container.innerHTML = `<div class="no-products coming-soon-banner"><h3>${category} Coming Soon!</h3><p>We're curating the best ${category.toLowerCase()} items for you. Check back shortly.</p></div>`;
+        btn.style.display = 'none';
+        return;
+    }
+    
+    const productsToDisplay = showAll ? filteredProducts : filteredProducts.slice(0, defaultPackagesToShow);
+    productsToDisplay.forEach(p => {
+      container.appendChild(window.createProductCard(p));
+    });
+    
+    if (filteredProducts.length > defaultPackagesToShow) {
+      btn.style.display = 'block';
+      btn.textContent = showAll ? 'View Fewer Packages' : 'View More Packages';
+    } else {
+      btn.style.display = 'none';
+    }
+  }
+
+  window.loadAllProducts = function(category){
+    const container = document.getElementById('allProductsContainer');
+    container.innerHTML='';
+
+    if (allProducts.length === 0) {
+        container.innerHTML = '<div class="no-products">The product list is currently empty for all categories.</div>';
+        return;
+    }
+    
+    allProducts.forEach(p => {
+      container.appendChild(window.createProductCard(p));
+    });
+  }
+
+  window.filterCategory = function(category, buttonElement){
+    
+    document.querySelectorAll('.network-buttons button').forEach(btn => btn.classList.remove('active'));
+    buttonElement.classList.add('active');
+    
+    showAllPackages = false;
+    window.loadHomeProducts(category, showAllPackages);
+  }
+  
+  window.toggleMorePackages = function(){
+    showAllPackages = !showAllPackages;
+    window.loadHomeProducts(currentCategory, showAllPackages);
+  }
+  
+  window.comingSoon = function(){ 
+      window.showNotificationModal('Coming Soon', 'This feature is currently under development. Please check back later!'); 
+  }
+
+  // --- Modal Logic ---
+  let resolveModalPromise = null;
+
+  window.showNotificationModal = function(title, message) {
+    const modal = document.getElementById('customModal');
+    document.getElementById('modalTitle').textContent = title;
+    document.getElementById('modalMessage').innerHTML = message;
+    
+    // Hide input and cancel button for simple notifications
+    document.getElementById('modalInputContainer').style.display = 'none';
+    document.getElementById('modalCancelBtn').style.display = 'none';
+    
+    const confirmBtn = document.getElementById('modalConfirmBtn');
+    confirmBtn.textContent = 'OK';
+    confirmBtn.onclick = () => {
+      modal.style.display = 'none';
+    };
+    
+    modal.style.display = 'flex';
+  }
+
+  window.showPromptModal = function(title, message, defaultValue) {
+    return new Promise((resolve) => {
+      resolveModalPromise = resolve;
+      
+      const modal = document.getElementById('customModal');
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalMessage').innerHTML = message;
+      
+      const inputContainer = document.getElementById('modalInputContainer');
+      const input = document.getElementById('modalInput');
+      inputContainer.style.display = 'block';
+      input.value = defaultValue || '';
+      
+      const confirmBtn = document.getElementById('modalConfirmBtn');
+      const cancelBtn = document.getElementById('modalCancelBtn');
+
+      confirmBtn.textContent = 'Confirm Order'; // Updated text for clarity
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.style.display = 'inline-block';
+
+      const handleConfirm = () => {
+          modal.style.display = 'none';
+          resolve(input.value); // Resolves the input value
+          confirmBtn.onclick = null;
+          cancelBtn.onclick = null;
+      };
+
+      const handleCancel = () => {
+          modal.style.display = 'none';
+          resolve(null); // Resolves null if cancelled
+          confirmBtn.onclick = null;
+          cancelBtn.onclick = null;
+      };
+      
+      confirmBtn.onclick = handleConfirm;
+      cancelBtn.onclick = handleCancel;
+      
+      modal.style.display = 'flex';
+      input.focus();
+    });
+  }
+
+  // --- Dedicated Receipt Modal Function ---
+  window.showReceiptModal = function(title, messageHtml) {
+    const modal = document.getElementById('customModal');
+    document.getElementById('modalTitle').textContent = title;
+    document.getElementById('modalMessage').innerHTML = messageHtml; 
+    
+    document.getElementById('modalInputContainer').style.display = 'none';
+    document.getElementById('modalCancelBtn').style.display = 'none';
+    
+    const confirmBtn = document.getElementById('modalConfirmBtn');
+    confirmBtn.textContent = 'Go to Home';
+    confirmBtn.onclick = () => {
+      modal.style.display = 'none';
+      // Navigate to home view after closing the modal
+      window.showSection(document.querySelector('[data-section-id="home"]'), 'home');
+    };
+    
+    modal.style.display = 'flex';
+  }
+
+  // --- Copy to Clipboard Utility ---
+  window.copyToClipboard = function(elementId, buttonElement) {
+    const copyText = document.getElementById(elementId).textContent;
+    const originalText = buttonElement.textContent;
+    const originalBackground = buttonElement.style.background;
+
+    try {
+        // Use a temporary textarea for clipboard operations
+        const tempInput = document.createElement("textarea");
+        tempInput.value = copyText;
+        document.body.appendChild(tempInput);
+        tempInput.select();
+        document.execCommand('copy');
+        document.body.removeChild(tempInput);
+        
+        // UX Improvement: Flash the button instead of showing a modal
+        buttonElement.textContent = '✅ Copied!';
+        buttonElement.disabled = true;
+        buttonElement.style.background = '#00a884'; // Green flash
+        
+        setTimeout(() => {
+            buttonElement.textContent = originalText;
+            buttonElement.disabled = false;
+            buttonElement.style.background = originalBackground;
+        }, 1500);
+
+    } catch (err) {
+        console.error('Failed to copy text: ', err);
+        // Fallback to notification modal if copy fails completely
+        window.showNotificationModal('Error', 'Failed to copy text. Please copy manually.');
+    }
+  }
+
+
+  // --- Cart and Checkout Logic ---
+
+  window.renderCart = function(items = currentCartItems){
+    const list = document.getElementById('cartList');
+    const emptyMsg = document.getElementById('emptyCartMessage');
+    const checkoutBtn = document.getElementById('checkoutCartBtn');
+    
+    list.innerHTML='';
+    let totalAmount = 0;
+    
+    if (items.length === 0) {
+        emptyMsg.style.display = 'block';
+        checkoutBtn.style.display = 'none';
+    } else {
+        emptyMsg.style.display = 'none';
+        
+        items.forEach(item => {
+            totalAmount += item.price;
+            const li = document.createElement('li');
+            li.classList.add('cart-item-detail');
+            li.innerHTML = `
+                <div class="cart-item-name">${item.name} <span class="text-xs opacity-70">(Code: ${item.uniqueCode})</span></div>
+                <div class="cart-item-price">${item.price.toFixed(2)} GHC</div>
+                <button class="remove-btn" aria-label="Remove item" onclick="removeFromCart('${item.cartId}')">
+                    🗑️
+                </button>
+            `;
+            list.appendChild(li);
+        });
+
+        // Add total summary
+        const totalLi = document.createElement('li');
+        totalLi.classList.add('cart-total-summary');
+        totalLi.innerHTML = `<strong>Total:</strong> <span>${totalAmount.toFixed(2)} GHC</span>`;
+        list.appendChild(totalLi);
+        
+        // Show checkout button only if there are items
+        checkoutBtn.textContent = `Checkout (Manual Payment) (${totalAmount.toFixed(2)} GHC)`;
+        checkoutBtn.style.display = 'block'; 
+    }
+  }
+
+  window.checkoutCart = async function(){
+      if (currentCartItems.length === 0) {
+          window.showNotificationModal('Cart Empty', 'Your cart is empty. Add items before checking out.');
+          return;
+      }
+      
+      const totalCost = currentCartItems.reduce((sum, item) => sum + item.price, 0).toFixed(2);
+      
+      // Check if any item in the cart is a Data Store item
+      const isDataOrder = currentCartItems.some(item => item.category === 'Data Store');
+      
+      // Step 1: Confirmation (Prompt used as general confirmation)
+      const confirmation = await window.showPromptModal(
+          'Confirm Manual Checkout',
+          `You are checking out <b>${currentCartItems.length} item(s)</b> for a total of <b>${totalCost} GHC</b>. Click 'Confirm Order' to initiate the order.`,
+          'Confirm' // Default value for user convenience
+      );
+      
+      if (confirmation === null) {
+          window.showNotificationModal('Checkout Cancelled', 'The checkout process was cancelled.');
+          return;
+      }
+      
+      // Step 2: Process each item
+      let successfulTransactions = 0;
+      let orderId = null; // Store one ID for the final receipt message (Order Identifier)
+      let purchasedCodes = []; // To collect all unique codes
+      let primaryPaymentCode = null; // The code to use as the mandatory reference
+
+      for (const item of currentCartItems) {
+          const itemAmount = item.price;
+          const itemName = item.name;
+          const itemId = item.id; 
+          const itemCode = item.uniqueCode; 
+          const itemCategory = item.category;
+
+          // Forced Manual Payment
+          const method = 'MANUAL'; 
+          const initialStatus = 'Awaiting Manual Payment';
+
+          const trxData = {
+              item: itemName, 
+              amount: itemAmount, 
+              productId: itemId, 
+              uniqueCode: itemCode, 
+              status: initialStatus,
+              category: itemCategory, // Store category for better tracking
+              userId: userId,
+              method: method
+          };
+
+          const trxRef = await saveNewTransaction(trxData);
+          
+          if (trxRef) {
+              const firestoreId = trxRef.id;
+              
+              if (!orderId) {
+                  orderId = firestoreId; // Store the first ID as the overall Order Identifier
+                  primaryPaymentCode = itemCode; // Set the code of the first item as the payment reference
+              }
+
+              purchasedCodes.push(itemCode); // Collect all codes
+
+              successfulTransactions++;
+              
+              // Remove item from cart after transaction is initiated
+              await removeFromCart(item.cartId);
+          }
+      }
+      
+      // Step 3: Show final receipt modal with payment instructions
+      if (successfulTransactions > 0) {
+          
+          // Dynamic Instruction Logic based on isDataOrder
+          let confirmationInstruction = '';
+          if (isDataOrder) {
+              confirmationInstruction = 'Once payment is done, click the button below and <strong style="color: #38d430; text-decoration: underline;">SEND THE RECIPIENT NUMBER</strong> and a <strong style="color: #38d430; text-decoration: underline;">SCREENSHOT OF YOUR PAYMENT</strong>.';
+          } else {
+              confirmationInstruction = 'Once payment is done, click the button below and <strong style="color: #38d430; text-decoration: underline;">SEND A SCREENSHOT OF YOUR PAYMENT</strong>.';
+          }
+
+
+          // Use the short, static confirmation link as requested by the user
+          const whatsappCustomLink = staticConfirmationLink; 
+          const whatsappTrxId = orderId || 'N/A';
+          const whatsappCode = primaryPaymentCode || 'N/A';
+          
+          // Generate a list of all item codes for the receipt
+          const codesList = purchasedCodes.map(code => {
+              const isPrimary = code === primaryPaymentCode;
+              return `<span class="font-bold text-lg ${isPrimary ? 'text-yellow-500' : 'text-gray-400'}">${code}</span>`;
+          }).join(' &bull; ');
+
+
+          // --- RECEIPT HTML (UPDATED INSTRUCTIONS) ---
+          const receiptHtml = `
+              <p>Your order for <b>${successfulTransactions} item(s)</b> totaling <b>${totalCost} GHC</b> has been initiated.</p>
+              
+              <p style="margin-top:1.5rem; font-weight:700; color:var(--color-primary);">--- REQUIRED MANUAL PAYMENT DETAILS ---</p>
+              
+              <div id="paymentDetailsContainer" style="text-align:left; background:#333; padding:15px; border-radius:10px; margin:1rem auto; width:100%;">
+                  <p><strong>Bank/Wallet:</strong> ${manualPaymentDetails.bank}</p>
+                  
+                  <p style="display:flex; justify-content:space-between; align-items:center;">
+                    <strong>Account Name:</strong> 
+                    <span id="accountNameText" style="flex-grow:1; text-align:right; margin-right: 10px; font-weight: 500; font-size: 0.9rem;">${manualPaymentDetails.accountName}</span> 
+                    <button onclick="copyToClipboard('accountNameText', this)" style="padding:5px 10px; font-size:0.8rem; background:var(--color-primary); color:var(--color-dark); border-radius:8px; font-weight:700;">Copy</button>
+                  </p>
+                  
+                  <p style="display:flex; justify-content:space-between; align-items:center;">
+                    <strong>Account No:</strong> 
+                    <span id="accountNumberText" style="flex-grow:1; text-align:right; margin-right: 10px; font-weight: bold;">${manualPaymentDetails.accountNumber}</span> 
+                    <button onclick="copyToClipboard('accountNumberText', this)" style="padding:5px 10px; font-size:0.8rem; background:var(--color-primary); color:var(--color-dark); border-radius:8px; font-weight:700;">Copy</button>
+                  </p>
+
+                  <p style="display:flex; justify-content:space-between; align-items:center; border-top: 1px dashed #555; padding-top: 10px; margin-top: 10px;">
+                    <strong style="color: var(--color-primary);">MANDATORY REF (Product Code):</strong> 
+                    <span id="paymentReferenceText" style="flex-grow:1; text-align:right; margin-right: 10px; font-weight: bold; color: var(--color-primary);">${whatsappCode}</span> 
+                    <button onclick="copyToClipboard('paymentReferenceText', this)" style="padding:5px 10px; font-size:0.8rem; background:var(--color-primary); color:var(--color-dark); border-radius:8px; font-weight:700;">Copy</button>
+                  </p>
+
+                  <!-- TOTAL COST UNDER REFERENCE CODE -->
+                  <div style="margin-top: 15px; border-top: 1px solid #555; padding-top: 10px; text-align: center;">
+                    <p style="margin:0; font-size:1rem; color:#fff; opacity: 0.8;">TOTAL AMOUNT TO PAY:</p>
+                    <strong style="font-size: 2rem; color: #38d430; text-shadow: 0 0 5px rgba(56, 212, 48, 0.5);">${totalCost} GHC</strong>
+                  </div>
+
+              </div>
+              
+              <!-- DYNAMIC INSTRUCTION STEP -->
+              <h4 style="color:var(--color-primary); margin-top:1.5rem; font-weight:800; text-transform:uppercase;">Step 2: Confirm Purchase</h4>
+              <p style="font-weight: 600; font-size: 1rem; line-height: 1.4; margin-bottom: 15px;">
+                ${confirmationInstruction}
+              </p>
+
+              <!-- WHATSAPP LINK PLACED HERE (PROMINENTLY) -->
+              <a href="${whatsappCustomLink}" target="_blank" style="display:inline-block; margin-top:0.5rem; padding:12px 25px; background:#25D366; color:white; border-radius:10px; font-weight: 700; text-decoration: none; transition: transform 0.2s; box-shadow: 0 4px 10px rgba(37, 211, 102, 0.5);">
+                  <img src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg" alt="WhatsApp" style="width:20px; height:20px; display:inline-block; vertical-align:middle; margin-right:8px; filter: invert(1);">
+                  Chat to Confirm Payment
+              </a>
+
+              <p style="font-size:0.8rem; opacity:0.6; margin-top:1.5rem; margin-bottom: 0.5rem;">Order Identifier (For Internal Use): <strong>${whatsappTrxId}</strong></p>
+              
+              <p style="font-weight: 600; color: #aaa;">All Item Codes in this Order:</p>
+              <p style="font-weight: 800; margin-bottom: 0; line-height: 1.5;">${codesList}</p>
+          `;
+          
+          window.showReceiptModal('Order Initiated Successfully', receiptHtml);
+
+      } else {
+          window.showNotificationModal('Checkout Failed', 'No items were successfully processed. Please try again.');
+      }
+  }
+
+  // --- Transaction Rendering (Updated to show uniqueCode) ---
+  window.renderTransactions = function(trxs = currentTransactionSnapshot){
+    const list = document.getElementById('transactionList');
+    const noTrx = document.getElementById('noTransactions');
+    
+    list.innerHTML='';
+    
+    if (trxs.length === 0) {
+      noTrx.style.display = 'block';
+    } else {
+      noTrx.style.display = 'none';
+      trxs.forEach(t=>{
+        const li = document.createElement('li');
+        let statusColor = 'orange';
+        if (t.status.includes('Cancelled')) statusColor = 'red';
+        else if (t.status.includes('Awaiting')) statusColor = 'lightblue';
+        else if (t.status.includes('Completed')) statusColor = 'lightgreen';
+        
+        const refId = t.firestoreId || 'N/A'; 
+        const itemCode = t.uniqueCode || 'N/A'; // uniqueCode included
+        
+        li.style.borderLeftColor = statusColor;
+        li.innerHTML = `<strong>${t.item || 'N/A'} - ${(t.amount || 0).toFixed(2)} GHC</strong><br>
+                        <small>Item Code: ${itemCode} | Order Ref: ${refId}</small><br>
+                        Status: <span style="color: ${statusColor}; font-weight: 700;">${t.status || 'N/A'}</span>`;
+        list.appendChild(li);
+      });
+    }
+  }
+
+  // --- UI/Navigation Logic ---
+  window.toggleSidebar = function(){ document.getElementById('sidebar').classList.toggle('active'); }
+  
+  window.showSection = function(linkElement, id){
+    document.getElementById('sidebar').classList.remove('active');
+    
+    document.querySelectorAll('.sidebar a').forEach(a => a.classList.remove('active-link'));
+    
+    if (linkElement) {
+        linkElement.classList.add('active-link');
+    }
+    
+    ['home','products','about','contact','transactions','cart'].forEach(s=>{
+      const section = document.getElementById(s);
+      if(section) section.style.display='none'; 
+    });
+    
+    const sectionToShow = document.getElementById(id);
+    if(sectionToShow) {
+      if (id === 'home' || id === 'transactions' || id === 'cart' || id === 'about' || id === 'contact') {
+        sectionToShow.style.display = 'flex';
+      } else {
+        sectionToShow.style.display = 'block';
+      }
+      
+      if (id === 'products') window.loadAllProducts(currentCategory);
+      if (id === 'transactions') window.renderTransactions();
+      if (id === 'cart') window.renderCart();
+      
+      // Re-load home products to correctly hide/show the data info icon if we return to home
+      if (id === 'home') {
+          // Re-load the products using the currently active category
+          const activeCategoryButton = document.querySelector('.network-buttons button.active');
+          const category = activeCategoryButton ? activeCategoryButton.getAttribute('data-category') : 'Electronics';
+          window.loadHomeProducts(category, showAllPackages);
+      } else {
+          // Ensure the Data Info button and panel are hidden when navigating away from Home
+          document.getElementById('dataInfoToggleBtn').style.display = 'none';
+          document.getElementById('dataInfoPanel').style.display = 'none';
+      }
+    }
+  }
+
+  document.addEventListener('click', function(e){
+    const sidebar=document.getElementById('sidebar');
+    const menuBtn=document.querySelector('.menu-btn');
+    if(sidebar.classList.contains('active') && !sidebar.contains(e.target) && e.target!==menuBtn){
+      sidebar.classList.remove('active');
+    }
+  });
+
+  document.addEventListener('DOMContentLoaded', initFirebase);
+</script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700;800;900&display=swap');
+
+/* GLOBAL RESET FOR BETTER ALIGNMENT */
+* {
+    box-sizing: border-box;
+}
+
+/* --- THEME COLORS (DEFAULT: DARK) --- */
+:root {
+  --color-primary: #ffd700; /* Gold Accent */
+  --color-secondary: #1a73e8; /* Blue Accent */
+  --color-dark: #1a1a1a; /* Used for Sidebar Background */
+  --color-card-background: #1a1a1a; /* Used for Card Background (Remains dark) */
+  --color-background: #000000; /* Main App Background */
+  --color-light-background: #111111; /* Slightly lighter dark background, used for list items */
+  --color-text-light: #ffffff; /* Default: White text on dark background */
+  --color-text-dark: #333333; /* Default: Dark text on light button background */
+  --transition-speed: 0.35s;
+}
+
+/* --- LIGHT MODE OVERRIDES (Inverted High Contrast) --- */
+body[data-theme="light"] {
+    --color-primary: #8e24aa; /* Purple Accent */
+    --color-secondary: #00a884; /* Teal Accent */
+    
+    /* FIX 1: Page and Sidebar Backgrounds change to light */
+    --color-background: #ffffff; 
+    --color-light-background: #f8f8f8;
+    --color-dark: #f0f0f0; 
+    
+    /* Card Background REMAINS DARK (No change to this variable) */
+    --color-card-background: #1a1a1a; 
+
+    /* FIX 2: Set the main body text color to dark for readability on the light page background. */
+    color: var(--color-text-dark); 
+}
+
+body {
+  font-family: 'Poppins', Arial, sans-serif;
+  margin: 0; padding: 0;
+  /* Use CSS Variables for the background gradient */
+  background: linear-gradient(135deg, var(--color-background), var(--color-light-background));
+  color: var(--color-text-light); /* Default is white/light. Overridden in light mode. */
+  min-height: 100vh;
+  overflow-x: hidden;
+  transition: all 0.3s ease-in-out; /* Smooth transition for theme change */
+}
+
+
+/* STICKY BUTTONS */
+.fixed-btn {
+  position: fixed; border:none; cursor:pointer; display:none; 
+  align-items:center; justify-content:center; font-size:1.5rem;
+  color:var(--color-text-light); z-index:1100; width:50px; height:50px;
+  border-radius:50%; box-shadow:0 4px 12px rgba(0,0,0,0.6);
+  background:var(--color-dark); transition: transform var(--transition-speed), background 0.3s, color 0.3s;
+}
+.fixed-btn:hover { transform: scale(1.05); }
+
+.menu-btn { top:15px; left:15px; } 
+.theme-toggle-btn { top:15px; right:15px; } 
+
+/* NEW DATA INFO BUTTON (Notification Icon) */
+#dataInfoToggleBtn {
+    bottom: 20px;
+    right: 20px;
+    background: #ff4500; /* Red-Orange for Alert */
+    color: white;
+    font-size: 2rem;
+    width: 60px;
+    height: 60px;
+    z-index: 1000;
+    box-shadow: 0 4px 15px rgba(255, 69, 0, 0.7);
+    animation: pulse 1.5s infinite;
+}
+#dataInfoToggleBtn.active {
+    opacity: 0.8; /* Make it visible but not pulsing when active */
+    animation: none;
+    transform: scale(1.05);
+}
+@keyframes pulse {
+    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 69, 0, 0.7); }
+    70% { transform: scale(1.05); box-shadow: 0 0 0 10px rgba(255, 69, 0, 0); }
+    100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 69, 0, 0); }
+}
+
+/* DATA INFO PANEL STYLES (Floating Must-Read) */
+#dataInfoPanel {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.95);
+    z-index: 1500;
+    display: none; /* Controlled by JS */
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    overflow-y: auto;
+    text-align: center;
+}
+#dataInfoPanelContent {
+    background: var(--color-card-background);
+    color: var(--color-text-light);
+    padding: 30px;
+    border-radius: 20px;
+    max-width: 500px;
+    width: 95%;
+    box-shadow: 0 0 30px rgba(255, 215, 0, 0.3);
+    border: 2px solid #ff4500;
+    position: relative;
+    margin: auto;
+}
+#dataInfoPanelContent h3 {
+    color:#f00; margin-bottom: 15px; font-size: 1.6rem; border-bottom: 2px solid #f005; padding-bottom: 10px; font-weight:900;
+}
+#dataInfoPanelContent ul {
+    list-style:none; padding:0; text-align:left; font-size: 1rem; margin-bottom: 10px; line-height: 1.7;
+}
+#dataInfoPanelContent li {
+    color: #eee;
+    margin-bottom: 10px;
+}
+#dataInfoPanelContent li strong {
+    color: #f00;
+    font-weight: 800;
+}
+#dataInfoPanelContent li .urgent {
+    color: #38d430;
+    font-weight: 800;
+}
+
+#closeDataInfo {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: transparent;
+    border: none;
+    color: var(--color-primary);
+    font-size: 1.5rem;
+    cursor: pointer;
+    line-height: 1;
+}
+
+body[data-theme="light"] .fixed-btn {
+    /* Background of fixed buttons changes with the sidebar/page background */
+    background: var(--color-dark); 
+    color: var(--color-text-dark); /* Icon color changes to dark on light background */
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    border: 1px solid #ddd;
+}
+body[data-theme="light"] #dataInfoPanelContent {
+    background: var(--color-card-background);
+    color: white;
+}
+body[data-theme="light"] #dataInfoToggleBtn {
+    background: #ff4500;
+    color: white;
+}
+
+
+/* SIDEBAR */
+.sidebar {
+  position: fixed; left:-100%; top:0; width:min(85vw, 300px);
+  height:100vh; background: var(--color-dark); z-index:1200; 
+  display:flex; flex-direction:column; padding-top:2rem;
+  box-shadow: 2px 0 10px rgba(0,0,0,0.5);
+  transition:left var(--transition-speed) ease-in-out, background 0.3s;
+}
+.sidebar.active { left:0; }
+/* FIX 3: Ensure sidebar text switches to dark in light mode */
+.sidebar h1 { color:var(--color-text-light); font-size:2rem; margin-bottom:1rem; text-align:center; }
+body[data-theme="light"] .sidebar h1 { color: var(--color-text-dark); }
+
+#userIdDisplay { color: #888; font-size: 0.8rem; text-align: center; margin-bottom: 2rem;}
+
+/* FIX 4: Ensure sidebar links switch to dark in light mode */
+.sidebar a {
+  color:var(--color-text-light); text-decoration:none; font-weight:600;
+  margin:0.5rem 0; width:90%; padding:0.8rem 0;
+  border-radius:12px; transition: background 0.3s, color 0.3s;
+  text-align:center;
+  align-self: center;
+}
+body[data-theme="light"] .sidebar a { color: var(--color-text-dark); }
+.sidebar a:hover, .sidebar a.active-link { background:var(--color-primary); color:var(--color-text-dark); box-shadow: 0 0 10px rgba(255, 215, 0, 0.6); }
+
+/* MAIN CONTENT */
+.main {
+  padding: 4rem 0 1rem 0; 
+  max-width:900px; margin:auto;
+  display:none; flex-direction:column; align-items:center;
+  min-height: 100vh; /* Ensure content pushes footer down */
+}
+.main section { 
+    width: 100%; 
+    padding: 0 1rem; 
+    flex-grow: 1; /* Allow sections to take up space */
+}
+
+/* HEADER BAR STYLES */
+.main-header-bar {
+    width: 100%;
+    padding: 1.5rem 1rem 0.5rem;
+    background: linear-gradient(180deg, var(--color-dark), var(--color-background));
+    border-top-left-radius: 20px;
+    border-top-right-radius: 20px;
+    text-align: center;
+    color: var(--color-text-light);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+    margin-bottom: 1rem; 
+    transition: background 0.3s, box-shadow 0.3s;
+}
+
+body[data-theme="light"] .main-header-bar {
+    /* Background switches to light colors in light mode */
+    background: linear-gradient(180deg, var(--color-dark), var(--color-background));
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+}
+
+.main-header-bar h2 {
+    color: var(--color-primary);
+    font-size: 2rem;
+    font-weight: 800;
+    margin: 0;
+    line-height: 1.2;
+}
+/* FIX 5: Ensure header bar description text switches to dark in light mode */
+.main-header-bar p {
+    color: var(--color-text-light); /* Default white */
+    opacity: 0.8;
+    font-size: 0.9rem;
+    margin: 0.2rem 0 0;
+}
+body[data-theme="light"] .main-header-bar p {
+    color: var(--color-text-dark); /* Switches to dark */
+}
+
+
+/* CATEGORY BUTTONS */
+.network-buttons { 
+  display:flex; gap:0.4rem; 
+  margin-bottom:2rem; 
+  justify-content:center; 
+  padding: 0 1rem;
+  width: 100%;
+}
+.network-buttons button {
+  padding:0.7rem 0.5rem; 
+  border:none; border-radius:12px;
+  cursor:pointer; font-weight:600; background: var(--color-secondary);
+  color:var(--color-text-light); transition:0.3s;
+  font-size: 0.85rem; 
+  flex: 1 1 0%; 
+  min-width: 0; 
+  white-space: nowrap; 
+  overflow: hidden; 
+}
+.network-buttons button:hover { opacity: 0.9; transform: translateY(-2px); }
+.network-buttons button.active { background:var(--color-primary); color:var(--color-text-dark); box-shadow: 0 0 10px rgba(255, 215, 0, 0.6); }
+
+body[data-theme="light"] .network-buttons button {
+    background: #ccc;
+    color: var(--color-text-dark);
+}
+body[data-theme="light"] .network-buttons button.active { 
+    background:var(--color-primary); 
+    color:var(--color-text-dark); 
+    box-shadow: 0 0 10px rgba(142, 36, 170, 0.4);
+}
+
+
+/* PRODUCTS */
+.container { display:flex; flex-wrap:wrap; justify-content:center; gap:1.5rem; padding: 0 0.5rem; } 
+
+.card {
+  /* MODERN CARD DESIGN - REMAINS DARK */
+  background: var(--color-card-background); /* Always uses the dark color */
+  color: var(--color-text-light); /* Default white text */
+  width: 90%;
+  max-width: 350px;
+  border-radius: 14px; 
+  box-shadow: 0 5px 20px rgba(0,0,0,0.15);
+  padding: 2.2rem 1.5rem 1.8rem; 
+  text-align: center;
+  transition: 0.3s ease;
+  opacity: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between; 
+  border: 1px solid #333;
+}
+@media (min-width: 600px) {
+  .card { width: min(45vw, 220px); }
+}
+.card.show { opacity:1; }
+.card:hover { transform: translateY(-5px); box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
+.card h2 { color:var(--color-text-light); margin-top: 10px; margin-bottom: 8px; font-size: 1.6rem; font-weight: 800; letter-spacing: 0.5px; }
+.card p { color:var(--color-text-light); opacity: 0.7; margin:0.5rem 0 1.2rem 0; font-size:1.05rem; font-weight: 600; }
+.mtn-label { font-weight:600; margin-bottom:0.8rem; background: linear-gradient(45deg,var(--color-primary),#ff9800); padding:4px 12px; border-radius:15px; display:inline-block; color:var(--color-text-dark); font-size: 0.8rem; }
+
+/* FIX 6: Force text inside the dark cards to remain white in light mode */
+body[data-theme="light"] .card {
+    background: var(--color-card-background); 
+    color: #ffffff; 
+    border: 1px solid #333;
+}
+body[data-theme="light"] .card h2, 
+body[data-theme="light"] .card p {
+    color: #ffffff; 
+}
+
+
+/* PURCHASE BUTTON (Now Add to Cart) */
+.btn-purchase {
+  display:block; margin-top: auto; padding:0.9rem; border-radius:8px; 
+  border:none; font-size:0.95rem; cursor:pointer; width:95%; 
+  font-weight:700; text-transform: uppercase;
+  background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+  color:var(--color-text-light); text-shadow:0 1px 3px rgba(0,0,0,0.4);
+  transition: all 0.3s;
+}
+/* FIX 7: Ensure button text is white for better contrast on colorful button */
+body[data-theme="light"] .btn-purchase {
+    color: #ffffff; 
+}
+
+.btn-purchase:hover { transform: scale(1.02); opacity: 0.9; }
+
+/* VIEW MORE */
+.view-more {
+  display:block; margin:1.5rem auto 0; padding:1rem 1.5rem; font-size:1rem;
+  font-weight:600; color:var(--color-text-light); background: var(--color-secondary);
+  border-radius:12px; cursor:pointer; text-align:center; width:220px; border: none;
+  transition: background 0.3s;
+}
+.view-more:hover { opacity: 0.9; }
+
+/* FOOTER */
+footer {
+  background:var(--color-dark); color:var(--color-text-light); opacity: 0.8; text-align:center; padding:1.5rem;
+  font-size:0.9rem; width:100%; position: static; margin-top: 3rem;
+  transition: background 0.3s;
+}
+body[data-theme="light"] footer {
+    /* Footer background also switches to light */
+    background: var(--color-dark);
+    color: var(--color-text-dark); /* Ensure footer text is dark */
+}
+.footer-message { color: var(--color-primary); font-weight: 600; font-size: 1rem; margin-bottom: 5px; }
+
+/* GET STARTED (Splash Screen) - UPDATED FOR SIMPLE LOOK, GOLDEN BUTTON */
+#get-started {
+  position:fixed; top:0; left:0; width:100%; height:100%;
+  /* Reverting to a simple dark background */
+  background: linear-gradient(135deg, #000000, #111111); 
+  display:flex; 
+  flex-direction:column; align-items:center; justify-content:center; z-index:1500;
+  text-align:center; padding: 20px;
+  box-sizing: border-box; 
+  transition: background 0.3s;
+}
+#get-started p{
+  color:var(--color-primary); /* Keep text gold */
+  font-size:3.5rem;
+  font-weight: 900;
+  margin-bottom:2rem;
+  text-shadow: 0 0 8px rgba(255, 215, 0, 0.5); 
+}
+#get-started .loading-text {
+  font-size:1.4rem; 
+  font-weight:700; 
+  color:#888;
+  margin-bottom: 1rem;
+}
+.start-button {
+    /* New Golden Gradient Button Style */
+    padding: 1rem 3rem;
+    font-size: 1.2rem;
+    font-weight: 800;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    background: linear-gradient(135deg, #FFD700, #FFA500); /* Golden Gradient */
+    color: var(--color-dark); /* Dark text on bright background */
+    box-shadow: 0 5px 20px rgba(255, 215, 0, 0.5);
+    transition: transform 0.2s, box-shadow 0.2s, opacity 0.5s;
+    opacity: 0; /* Hidden initially */
+    margin-top: 2rem;
+    pointer-events: none; /* Disable interaction until ready */
+}
+.start-button.ready {
+    opacity: 1;
+    pointer-events: auto;
+}
+.start-button:hover {
+    transform: scale(1.05);
+    box-shadow: 0 8px 25px rgba(255, 215, 0, 0.7);
+}
+
+/* CUSTOM MODAL STYLES */
+#customModal {
+  position:fixed; top:0; left:0; width:100%; height:100%;
+  background:rgba(0,0,0,0.8);z-index:2000;display:none;
+  align-items:center;justify-content:center;
+  backdrop-filter: blur(5px);
+}
+#modalContent {
+  background:var(--color-light-background);color:var(--color-text-light);padding:30px;
+  border-radius:20px;max-width:380px;width:90%;
+  text-align:center;box-shadow:0 15px 35px rgba(255, 215, 0, 0.5);
+  animation: fadeInDown 0.3s ease-out;
+  transition: background 0.3s, color 0.3s;
+}
+/* FIX 8: Ensure Modal text is dark in light mode as modal background will be light */
+body[data-theme="light"] #modalContent {
+    background: var(--color-light-background);
+    color: var(--color-text-dark); 
+    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.2);
+}
+
+#modalTitle { color:var(--color-primary);margin-top:0; border-bottom: 2px solid #333; padding-bottom: 10px; }
+body[data-theme="light"] #modalTitle { border-bottom: 2px solid #ccc; }
+
+#modalMessage { line-height: 1.6; }
+#modalInput { padding:10px; width:100%; box-sizing:border-box; border:1px solid #ccc; border-radius:8px; margin-top: 15px; font-weight: 600; color: var(--color-text-light); background: var(--color-dark); }
+/* FIX 9: Ensure modal input text is dark in light mode */
+body[data-theme="light"] #modalInput { color: var(--color-text-dark); background: #fff; border-color: #aaa; }
+
+#modalButtons button { padding:10px 20px; border:none; border-radius:8px; font-weight:700; cursor:pointer; margin: 5px; transition: background 0.2s; }
+#modalConfirmBtn { background:var(--color-secondary); color:var(--color-text-light); }
+#modalCancelBtn { background:#ccc; color:#333; }
+
+/* TRANSACTION/CART/ABOUT/CONTACT CARD STYLING */
+#transactions, #cart, #about, #contact {
+  flex-direction: column;
+  align-items: center; 
+  padding: 0 1rem;
+}
+
+.transaction-card {
+    width: 100%;
+    max-width: 600px;
+    background: var(--color-card-background); /* Stays Dark */
+    padding: 25px;
+    border-radius: 15px;
+    box-shadow: 0 5px 20px rgba(255, 215, 0, 0.2); 
+    margin-top: 1rem;
+    text-align: center; 
+    border: 1px solid #333;
+    transition: all 0.3s;
+}
+
+/* FIX 10: Force text inside the dark transaction cards to remain white in light mode */
+body[data-theme="light"] .transaction-card {
+    background: var(--color-card-background); 
+    color: #ffffff; 
+    box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1); 
+    border: 1px solid #ccc;
+}
+
+.transaction-card h3, .transaction-card h2 {
+    color: var(--color-primary); 
+    margin-top: 0;
+    margin-bottom: 20px;
+    font-size: 1.5rem;
+    border-bottom: 2px solid var(--color-light-background); 
+    padding-bottom: 10px;
+    font-weight: 700;
+}
+body[data-theme="light"] .transaction-card h3, 
+body[data-theme="light"] .transaction-card h2 {
+    border-bottom: 2px solid #ddd; 
+}
+
+/* Ensure paragraph text is readable and centered inside the card */
+.transaction-card p, .transaction-card a {
+    color: var(--color-text-light); /* Default white */
+    line-height: 1.6;
+}
+body[data-theme="light"] .transaction-card p, 
+body[data-theme="light"] .transaction-card a {
+    color: #ffffff; /* Force white text */
+}
+
+.transaction-card a {
+    color: var(--color-primary);
+    font-weight: 600;
+    text-decoration: none;
+    display: block; 
+    margin: 0.5rem 0;
+}
+.transaction-card a:hover {
+    text-decoration: underline;
+}
+
+/* LIST STYLING INSIDE CARDS (For Transactions/Cart) */
+#transactionList, #cartList {
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    text-align: left;
+}
+#transactionList li {
+    background: var(--color-light-background);
+    color: var(--color-text-light); /* Default white */
+    padding: 15px;
+    margin-bottom: 15px; 
+    border-radius: 10px;
+    box-shadow: none; 
+    border-left: 5px solid;
+    transition: transform 0.2s, background 0.3s;
+}
+/* FIX 11: Keep list item background and text white in light mode */
+body[data-theme="light"] #transactionList li {
+    background: var(--color-card-background); 
+    color: #ffffff; 
+}
+
+/* CART SPECIFIC STYLES */
+.cart-item-detail {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--color-light-background);
+    padding: 15px;
+    margin-bottom: 10px;
+    border-left: 5px solid var(--color-secondary);
+}
+/* FIX 12: Keep cart item background and text white in light mode */
+body[data-theme="light"] .cart-item-detail {
+    background: var(--color-card-background);
+}
+
+.cart-item-name {
+    flex-grow: 1;
+    font-weight: 600;
+    color: var(--color-text-light); /* Default white */
+}
+body[data-theme="light"] .cart-item-name {
+    color: #ffffff; /* Force white */
+}
+
+.cart-item-price {
+    font-weight: 700;
+    color: var(--color-primary);
+    margin-right: 15px;
+}
+.remove-btn {
+    background: #555;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 5px 10px;
+    transition: background 0.2s;
+}
+.remove-btn:hover {
+    background: #f05060;
+}
+.cart-total-summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 0 10px;
+    font-size: 1.2rem;
+    border-top: 1px dashed #444;
+}
+body[data-theme="light"] .cart-total-summary {
+    border-top: 1px dashed #ccc;
+    color: var(--color-text-dark); /* Summary text is on the light page background, so it must be dark */
+}
+.cart-total-summary span {
+    font-size: 1.5rem;
+    color: var(--color-primary);
+    font-weight: 800;
+}
+.checkout-btn {
+    width: 100%;
+    padding: 1rem;
+    margin-top: 20px;
+    font-size: 1.1rem;
+    font-weight: 700;
+    border: none;
+    border-radius: 10px;
+    background: linear-gradient(90deg, #38d430, #228b22);
+    color: var(--color-text-light);
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+/* FIX 13: Ensure checkout button text is white for contrast */
+body[data-theme="light"] .checkout-btn {
+    color: #ffffff;
+}
+
+.checkout-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px rgba(56, 212, 48, 0.4);
+}
+/* NEW STYLES FOR RECEIPT MODAL */
+#paymentDetailsContainer {
+    color: white !important; /* Force white text on the dark payment background */
+}
+#paymentDetailsContainer strong {
+    color: var(--color-primary) !important;
+}
+</style>
+</head>
+<body data-theme="dark">
+
+<!-- SPLASH SCREEN (Requires Button Click) -->
+<div id="get-started">
+  <p>LUXE STORE</p>
+  <div class="loading-text">Initializing store data...</div>
+  <!-- New Golden Gradient Button -->
+  <button id="startShoppingBtn" class="start-button">
+    Shop Now
+  </button>
+</div>
+
+<!-- DATA STORE MUST READ PANEL -->
+<div id="dataInfoPanel" style="display: none;" onclick="event.target.id === 'dataInfoPanel' && toggleDataInfo()">
+    <div id="dataInfoPanelContent">
+        <button id="closeDataInfo" aria-label="Close" onclick="toggleDataInfo()">✕</button>
+        <h3>⚠️ DATA STORE: MUST READ ⚠️</h3>
+        <ul style="list-style:none; padding:0; text-align:left; font-size: 0.95rem; margin-bottom: 10px; line-height: 1.7;">
+            <li>
+                <strong>❌ DELIVERY IS NOT INSTANT.</strong> Expect delivery between 30 minutes to 1 hour.
+            </li>
+            <li>
+                <strong>❌ INCOMPATIBILITY:</strong> This data bundle type <strong>DOES NOT WORK</strong> for Turbonet, Broadband, or Merchant SIM cards.
+            </li>
+            <li>
+                <strong>🚫 NON-REFUNDABLE:</strong> Data purchased for a <strong>WRONG NUMBER IS NON-REFUNDABLE</strong>. Please verify your recipient number before purchasing.
+            </li>
+            <li>
+                <span class="urgent">✅ URGENT BUNDLE:</span> If you need an urgent bundle, please dial <strong>*138#</strong> directly.
+            </li>
+        </ul>
+    </div>
+</div>
+
+<!-- MENU BUTTON -->
+<button class="menu-btn fixed-btn" aria-label="Open menu" onclick="toggleSidebar()">☰</button>
+
+<!-- THEME TOGGLE BUTTON -->
+<button id="theme-toggle-btn" class="theme-toggle-btn fixed-btn" aria-label="Toggle theme" onclick="toggleTheme()">☀️</button>
+
+<!-- DATA INFO TOGGLE BUTTON (Only visible on Data Store page) -->
+<button id="dataInfoToggleBtn" class="fixed-btn" aria-label="Important Data Info" onclick="toggleDataInfo()">
+    🚨
+</button>
+
+<nav class="sidebar" id="sidebar" role="navigation">
+  <h1>Profile</h1>
+  <p id="userIdDisplay">User ID: Loading...</p>
+  <a href="#home" data-section-id="home" onclick="showSection(this, 'home')">🏠 Home</a>
+  <a href="#products" data-section-id="products" onclick="showSection(this, 'products')">📦 Products</a>
+  <a href="#cart" data-section-id="cart" onclick="showSection(this, 'cart')">🛒 Cart <span id="cartItemCount"></span></a>
+  <a href="#transactions" data-section-id="transactions" onclick="showSection(this, 'transactions')">🧾 Transactions</a>
+  <a href="#about" data-section-id="about" onclick="showSection(this, 'about')">✨ About Us</a>
+  <a href="#contact" data-section-id="contact" onclick="showSection(this, 'contact')">📞 Contact</a>
+</nav>
+
+<div id="customModal">
+    <div id="modalContent">
+        <h3 id="modalTitle"></h3>
+        <p id="modalMessage"></p>
+        <div id="modalInputContainer">
+            <!-- This is used for confirmation prompt -->
+            <input type="text" id="modalInput" placeholder="Type 'Confirm' to proceed">
+        </div>
+        <div id="modalButtons">
+            <button id="modalConfirmBtn"></button>
+            <button id="modalCancelBtn"></button>
+        </div>
+    </div>
+</div>
+
+<main class="main" id="main" role="main">
+
+  <section id="home" style="display:flex; flex-direction:column; align-items:center;">
+    
+    <div class="main-header-bar">
+      <h2>LUXE STORE</h2>
+      <p>Data, Electronics, and Fashion.</p>
+    </div>
+
+    <div class="network-buttons" id="categoryButtons">
+      <button class="active" data-category="Electronics" onclick="filterCategory('Electronics', this)">Electronics</button>
+      <button data-category="Fashion" onclick="filterCategory('Fashion', this)">Fashion</button>
+      <button data-category="Data Store" onclick="filterCategory('Data Store', this)">Data Store</button>
+    </div>
+    
+    <div id="homeProducts" class="container">
+        <!-- Products will be loaded here. -->
+    </div>
+    <button id="viewMoreBtn" class="view-more" onclick="toggleMorePackages()" style="display:none;">View More Packages</button>
+  </section>
+
+  <section id="products" style="display:none;">
+    <h2>All Products</h2>
+    <div id="allProductsContainer" class="container">
+      <!-- Products will be loaded here, or the 'No products' message will appear. -->
+    </div>
+  </section>
+
+  <!-- CART SECTION -->
+  <section id="cart" style="display:none;">
+    <div class="transaction-card">
+      <h3>Your Shopping Cart</h3>
+      <p id="emptyCartMessage" style="display:none; color:var(--color-primary); opacity: 0.9;">Your cart is empty. Start adding some items!</p>
+      <ul id="cartList"></ul>
+      <button id="checkoutCartBtn" class="checkout-btn" onclick="checkoutCart()" style="display:none;"></button>
+    </div>
+  </section>
+
+  <section id="transactions" style="display:none;">
+    <div class="transaction-card">
+      <h3>Your Transaction History</h3>
+      <p id="noTransactions" style="display:none; color:var(--color-primary); opacity: 0.9;">No transactions yet.</p>
+      <ul id="transactionList"></ul>
+    </div>
+  </section>
+
+  <section id="about" style="display:none;">
+    <!-- ABOUT MESSAGE WRAPPED IN CARD STYLE -->
+    <div class="transaction-card">
+      <h2>About Luxe Store Group</h2>
+      <p>Luxe Store is your one-stop shop for connecting and upgrading your life. We offer premium Data Bundles, the latest Electronics, and modern Fashion items, all delivered with a focus on quality, speed, and great customer service.</p>
+    </div>
+  </section>
+
+  <section id="contact" style="display:none;">
+    <!-- CONTACT MESSAGE WRAPPED IN CARD STYLE -->
+    <div class="transaction-card">
+      <h3>Get In Touch</h3>
+      <p>We're here to help! Whether you have questions about a product, an order, or need technical support, reach out to us using the contact methods below for a quick response.</p>
+      
+      <!-- General Inquiry Link -->
+      <p>WhatsApp / Call: <a href="https://wa.me/233548164533?text=Hi%20Luxe%20Store%20%F0%9F%9B%8D%E2%9C%A8" target="_blank">+233 54 816 4533</a></p>
+      <p>Email for business inquiries: <a href="mailto:zicciluxe@gmail.com">zicciluxe@gmail.com</a></p>
+    </div>
+  </section>
+
+  <footer>
+      <p class="footer-message">💖 Thank you for trusting Luxe Store! We appreciate your business. 🚀</p>
+      <p>Your transaction history is saved using Firebase Firestore.</p>
+      © 2025 Luxe Store — Fast & Affordable Data
+  </footer>
+</main>
+
+</body>
+</html>
+
